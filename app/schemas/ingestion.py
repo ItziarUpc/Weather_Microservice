@@ -12,10 +12,10 @@ class IngestionDailyRequest(BaseModel):
     - The application will normalize it to a UTC `date` (day granularity).
     """
 
-    date: Optional[datetime] = Field(
+    from_date: Optional[datetime] = Field(
         default=None,
-        description="Target date to ingest. If omitted, the service ingests yesterday (UTC).",
-        examples=["2026-01-13"],
+        description="Force ingestion start date (otherwise uses per-station last stored date, or 2024-01-01 if none).",
+        examples=["2024-01-01"],
     )
 
 

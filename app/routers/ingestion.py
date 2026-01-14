@@ -28,7 +28,7 @@ async def ingestion_daily(payload: IngestionDailyRequest, db: AsyncSession = Dep
     
     try:
         service = IngestionService(db=db)
-        result = await service.ingest_daily(target_date=payload.date)
+        result = await service.sync(forced_from=payload.from_date)
         return result
     except Exception as e:
         # In prod: log exception with stacktrace

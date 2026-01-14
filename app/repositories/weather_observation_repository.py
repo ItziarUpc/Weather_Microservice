@@ -131,3 +131,13 @@ class WeatherObservationRepository:
         total = (await self.db.execute(count_stmt)).scalar_one()
 
         return items, total
+    
+    async def get_latest_ts_by_station(self, station_id: int) -> Optional[datetime]:
+        """
+        Returns the latest observation timestamp stored for a station, or None if none exist.
+        """
+        stmt = select(func.max(WeatherObservation.ts)).where(
+            WeatherObservation.station_id == station_id
+        )
+        res = await self.db.execute(stmt)
+        return res.scalar_one()
