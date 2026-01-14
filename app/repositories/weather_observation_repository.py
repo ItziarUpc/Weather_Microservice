@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.weather_observation import WeatherObservation
@@ -92,6 +92,8 @@ class WeatherObservationRepository:
         station_id: int,
         start_ts: datetime,
         end_ts: datetime,
+        limit: int,
+        offset: int,
     ) -> list[WeatherObservation]:
         """
         Retrieve all observations for a given station within a time range.
@@ -114,6 +116,18 @@ class WeatherObservationRepository:
                 WeatherObservation.ts <= end_ts,
             )
             .order_by(WeatherObservation.ts.asc())
+            .limit(limit)
+            .offset(offset)
         )
-        result = await self.db.execute(stmt)
-        return list(result.scalars().all())
+
+        items = (await self.db.execute(stmt)).scalars().all()
+
+        count_stmt = select(func.count()).select_from(WeatherObservation).where(
+            WeatherObservation.station_id == station_id,
+            WeatherObservation.ts >= start_ts,
+            WeatherObservation.ts <= end_ts,
+        )
+
+        total = (await self.db.execute(count_stmt)).scalar_one()
+
+        return items, total

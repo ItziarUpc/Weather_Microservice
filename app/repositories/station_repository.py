@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -81,3 +81,23 @@ class StationRepository:
         await self.db.flush()
 
         return station
+    
+    async def list_stations(self, source: Optional[str] = None, limit: int = 1000, offset: int = 0) -> List[Station]:
+        """
+        List stations with optional provider filtering and pagination.
+
+        Args:
+            source: Optional provider filter (e.g. 'aemet' or 'meteocat').
+            limit: Max items to return.
+            offset: Pagination offset.
+
+        Returns:
+            A list of Station models.
+        """
+        
+        stmt = select(Station).order_by(Station.id.asc()).limit(limit).offset(offset)
+        if source:
+            stmt = stmt.where(Station.source == source)
+
+        res = await self.db.execute(stmt)
+        return list(res.scalars().all())

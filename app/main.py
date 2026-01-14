@@ -5,6 +5,10 @@ from fastapi import FastAPI
 from app.core.init_db import init_db
 from app.core.config import settings
 from app.routers.health import router as health_router
+from app.routers.ingestion import router as ingestion_router
+from app.routers.stations import router as stations_router
+from app.routers.observations import router as observations_router
+
 
 
 @asynccontextmanager
@@ -49,6 +53,9 @@ def create_app() -> FastAPI:
 
     # Register API routers
     app.include_router(health_router)
+    app.include_router(ingestion_router)
+    app.include_router(stations_router)
+    app.include_router(observations_router)
 
     return app
 

@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
-    BigInteger,
+    Integer,
     DateTime,
     Float,
     ForeignKey,
@@ -32,7 +32,7 @@ class WeatherObservation(Base):
     # ------------------------------------------------------------------
 
     id: Mapped[int] = mapped_column(
-        BigInteger,
+        Integer,
         primary_key=True,
         autoincrement=True,
         comment="Internal unique identifier for the observation",
