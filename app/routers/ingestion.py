@@ -21,14 +21,14 @@ router = APIRouter(prefix="/ingestion", tags=["Ingestion"])
         "those are counted and reported but do not abort ingestion."
     ),
 )
-async def ingestion_daily(payload: IngestionDailyRequest, db: AsyncSession = Depends(get_db)):
+async def ingestion_daily(db: AsyncSession = Depends(get_db)):
     """
     Daily ingestion orchestration endpoint.
     """
     
     try:
         service = IngestionService(db=db)
-        result = await service.sync(forced_from=payload.from_date)
+        result = await service.sync()
         return result
     except Exception as e:
         # In prod: log exception with stacktrace

@@ -24,6 +24,14 @@ class StationRepository:
         """
         self.db = db
 
+    async def get_by_id(self, station_id: int) -> Optional[Station]:
+        """
+        Return a station by its internal DB id, or None if not found.
+        """
+        stmt = select(Station).where(Station.id == station_id)
+        res = await self.db.execute(stmt)
+        return res.scalar_one_or_none()
+
     async def get_by_source_id(
         self,
         source: str,

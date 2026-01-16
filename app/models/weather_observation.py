@@ -22,7 +22,7 @@ class WeatherObservation(Base):
     weather station and timestamp.
 
     Observations are linked to a station and may contain multiple
-    meteorological variables (temperature, precipitation, wind, etc.).
+    meteorological variables (temperature, precipitation, etc.).
     """
 
     __tablename__ = "weather_observations"
@@ -62,16 +62,16 @@ class WeatherObservation(Base):
         comment="Maximum temperature for the observation period",
     )
 
+    tavg: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+        comment="Average temperature for the observation period",
+    )
+
     precip: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True,
         comment="Precipitation amount",
-    )
-
-    wind: Mapped[Optional[float]] = mapped_column(
-        Float,
-        nullable=True,
-        comment="Wind speed",
     )
 
     raw: Mapped[Optional[dict]] = mapped_column(

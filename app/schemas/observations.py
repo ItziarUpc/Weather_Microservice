@@ -12,8 +12,8 @@ class ObservationOut(BaseModel):
     date: datetime = Field(..., description="Observation date (UTC day)")
     tmin: Optional[float]
     tmax: Optional[float]
+    tavg: Optional[float]
     precip: Optional[float]
-    wind: Optional[float]
 
 
 class ObservationStationOut(BaseModel):

@@ -55,7 +55,6 @@ async def test_ingestion_daily_full_flow(test_app, db_session):
     assert response.status_code == 200, response.text
     body = response.json()
 
-    assert body["date"] == "2026-01-01"
     assert body["stations_upserted"]["aemet"] == 2
     assert body["stations_upserted"]["meteocat"] == 1
     assert body["observations_upserted"]["aemet"] == 2

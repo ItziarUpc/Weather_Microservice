@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Iterator, Optional
 
+import httpx
+from typing import Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repositories.station_repository import StationRepository
@@ -44,8 +47,79 @@ class IngestionService:
         # next day after latest stored
         latest_day = latest_ts.astimezone(timezone.utc).date()
         return latest_day + timedelta(days=1)
+    
+    async def _compute_start_date(self, station_id: int) -> date:
+        """
+        If station has observations -> last_date + 1
+        Else -> BACKFILL_START
+        """
+        latest_ts = await self.obs_repo.get_latest_ts_by_station(station_id)
+        if not latest_ts:
+            return self.BACKFILL_START
+        latest_day = latest_ts.astimezone(timezone.utc).date()
+        return latest_day + timedelta(days=1)
+    
+    @staticmethod
+    async def fetch_with_backoff(fn, *, max_retries: int = 3, sleep_seconds: int = 60):
+        """
+        Executes an async callable with automatic retry on HTTP 429 errors.
 
-    async def sync(self, forced_from: Optional[date] = None) -> IngestionDailyResponse:
+        Args:
+            fn: Async callable with no arguments.
+            max_retries: Maximum retry attempts.
+            sleep_seconds: Seconds to wait after a 429 response.
+
+        Returns:
+            The result of fn().
+
+        Raises:
+            RuntimeError if max retries are exceeded.
+            Any non-429 exception is re-raised immediately.
+        """
+        for attempt in range(1, max_retries + 1):
+            try:
+                return await fn()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    if attempt >= max_retries:
+                        raise RuntimeError("AEMET rate limit exceeded (max retries reached)") from e
+
+                    print(
+                        f"AEMET rate limit hit (429). "
+                        f"Retrying in {sleep_seconds}s (attempt {attempt}/{max_retries})"
+                    )
+                    await asyncio.sleep(sleep_seconds)
+                else:
+                    raise
+
+    @staticmethod
+    def add_months(d: date, months: int) -> date:
+        """Return date shifted by N months, keeping day when possible."""
+        y = d.year + (d.month - 1 + months) // 12
+        m = (d.month - 1 + months) % 12 + 1
+
+        # clamp day to last day of target month
+        # (no calendar module needed)
+        first_next_month = date(y + (m // 12), (m % 12) + 1, 1) if m < 12 else date(y + 1, 1, 1)
+        last_day = first_next_month - timedelta(days=1)
+        day = min(d.day, last_day.day)
+        return date(y, m, day)
+
+
+    def iter_chunks_max_6_months(self, start_d: date, end_d: date) -> Iterator[Tuple[date, date]]:
+        """
+        Yield (chunk_start, chunk_end) where each chunk length is <= 6 calendar months.
+        We implement '6 months' as: chunk_end = min(end_d, add_months(chunk_start, 6) - 1 day)
+        """
+        cur = start_d
+        while cur <= end_d:
+            chunk_end = self.add_months(cur, 6) - timedelta(days=1)
+            if chunk_end > end_d:
+                chunk_end = end_d
+            yield cur, chunk_end
+            cur = chunk_end + timedelta(days=1)
+
+    async def sync(self) -> IngestionDailyResponse:
         """
         Sync/backfill all stations incrementally.
         - First run: starts at 2024-01-01 for stations with no observations.
@@ -57,133 +131,168 @@ class IngestionService:
         observations_upserted: Dict[str, int] = {"aemet": 0, "meteocat": 0}
         failures: Dict[str, Any] = {}
 
-        # -------- Ensure stations exist first (metadata refresh) --------
-        # (Puedes decidir refrescar stations cada vez o solo en un endpoint aparte.)
+        # -------------------------
+        # AEMET (per-station range)
+        # -------------------------
         try:
             aemet = AemetClient()
-            aemet_stations = await aemet.list_stations()
-            for st in aemet_stations:
-                sid = st.get("idema") or st.get("indicativo") or st.get("id")
-                if not sid:
-                    continue
-                name = st.get("nombre") or st.get("name")
-                await self.station_repo.create_if_not_exists("aemet", str(sid), name=name)
-                stations_upserted["aemet"] += 1
-        except Exception as e:
-            failures["aemet_station_list"] = str(e)
-
-        try:
-            meteocat = MeteocatClient()
-            m_stations = await meteocat.list_stations()
-            for st in m_stations:
-                code = st.get("codi") or st.get("code") or st.get("id")
-                if not code:
-                    continue
-                name = st.get("nom") or st.get("name")
-                await self.station_repo.create_if_not_exists("meteocat", str(code), name=name)
-                stations_upserted["meteocat"] += 1
-        except Exception as e:
-            failures["meteocat_station_list"] = str(e)
-
-        # -------- AEMET: backfill day-by-day (bulk per day) --------
-        # Estrategia recomendada:
-        # - Determinar el rango global mínimo/máximo que falta
-        # - Iterar días y llamar daily_all_stations(d) (1 llamada por día)
-        # Esto es mucho más eficiente que por estación.
-        try:
             aemet_end = self._available_end_date("aemet")
 
-            # Para saber desde cuándo empezar globalmente:
-            # buscamos la MIN fecha faltante entre estaciones.
-            # (Versión simple: empezamos desde forced_from o BACKFILL_START)
-            aemet_start_global = forced_from or self.BACKFILL_START
+            aemet_stations = await aemet.list_stations()
 
-            aemet_client = AemetClient()
+            print("AEMET stations to process:", len(aemet_stations))
 
-            d = aemet_start_global
-            while d <= aemet_end:
-                print(f"AEMET: processing date {d.isoformat()}")
-                ts = self._ts_for_day(d)
-                daily_rows = await aemet_client.daily_all_stations(d)  # devuelve lista del día
-                # Si viene vacío, no necesariamente significa que no hay datos; pero normalmente sí.
-                # Aun así, seguimos al siguiente día.
-
-                for item in daily_rows:
-                    station_code = item.get("indicativo") or item.get("idema")
-                    if not station_code:
-                        continue
-
-                    st = await self.station_repo.get_by_source_id("aemet", str(station_code))
-                    if not st:
-                        st = await self.station_repo.create_if_not_exists("aemet", str(station_code), name=None)
-
-                    tmin = aemet_client.parse_numeric(item.get("tmin"))
-                    tmax = aemet_client.parse_numeric(item.get("tmax"))
-                    precip = aemet_client.parse_numeric(item.get("prec"))
-                    wind = None
-
-                    await self.obs_repo.upsert_observation(
-                        station_id=st.id,
-                        ts=ts,
-                        tmin=tmin,
-                        tmax=tmax,
-                        precip=precip,
-                        wind=wind,
-                        raw=item,
-                    )
-                    observations_upserted["aemet"] += 1
-
-                d += timedelta(days=1)
-
-        except Exception as e:
-            failures["aemet"] = str(e)
-
-        # -------- METEOCAT: incremental per station (porque endpoint es por estación/día) --------
-        # Aquí sí tiene sentido ir por estación, calcular start_date = last+1, end_date = today-3.
-        """ try:
-            meteocat_end = self._available_end_date("meteocat")
-            meteocat_client = MeteocatClient()
-
-            stations = await self.station_repo.list_stations(source="meteocat", limit=100000, offset=0)
-
-            meteocat_station_errors = 0
-
-            for st in stations:
-                start_d = await self._station_next_start_date(st.id, forced_from)
-                if start_d > meteocat_end:
+            for meta in aemet_stations:
+                sid = meta.get("idema") or meta.get("indicativo") or meta.get("id")
+                if not sid:
                     continue
 
+                sid = str(sid)
+                name = meta.get("nombre") or meta.get("name")
+
+                print("Processing AEMET station:", sid, name)
+
+                # 1) upsert station
+                st = await self.station_repo.create_if_not_exists(
+                    source="aemet",
+                    source_station_id=sid,
+                    name=name,
+                )
+                stations_upserted["aemet"] += 1
+
+                # 2) compute station-specific start/end
+                start_d = await self._compute_start_date(st.id)
+                print("  start date:", start_d)
+                end_d = aemet_end
+                print("  end date:", end_d)
+
+                if start_d > end_d:
+                    print("  station already up-to-date")
+                    continue  # station already up-to-date
+
+                
+                try:
+                    for chunk_start, chunk_end in self.iter_chunks_max_6_months(start_d, end_d):
+                        rows = await self.fetch_with_backoff(
+                            lambda: aemet.daily_range_by_station(
+                                source_station_id=sid,
+                                start_date=chunk_start,
+                                end_date=chunk_end,
+                            )
+                        )
+
+                        # 4) upsert rows
+                        for item in rows:
+                            # AEMET includes fecha per row; we trust it more than loop date
+                            fecha = item.get("fecha")
+                            if not fecha:
+                                continue
+
+                            # fecha typically "YYYY-MM-DD"
+                            day = date.fromisoformat(fecha)
+                            ts = self._ts_for_day(day)
+
+                            tmin = aemet.parse_numeric(item.get("tmin"))
+                            tmax = aemet.parse_numeric(item.get("tmax"))
+                            precip = aemet.parse_numeric(item.get("prec"))
+                            tmed = aemet.parse_numeric(item.get("tmed"))
+
+                            await self.obs_repo.upsert_observation(
+                                station_id=st.id,
+                                ts=ts,
+                                tmin=tmin,
+                                tmax=tmax,
+                                precip=precip,
+                                tavg=tmed,
+                                raw=item,
+                            )
+                            observations_upserted["aemet"] += 1
+                        
+                        #await asyncio.sleep(1.0)  # be nice with AEMET API
+
+                except Exception as e:
+                    # keep compact: one error per station
+                    print("  AEMET station data error:", str(e))
+                    failures.setdefault("aemet_station_errors", 0)
+                    failures["aemet_station_errors"] += 1
+                    continue
+
+                
+
+        except Exception as e:
+            print("AEMET sync error:", str(e))
+            failures["aemet"] = str(e)
+
+        # -------------------------
+        # METEOCAT (per-station loop)
+        # -------------------------
+        try:
+            meteocat = MeteocatClient()
+            meteocat_end = self._available_end_date("meteocat")
+
+            m_stations = await meteocat.list_stations()
+
+            print("Meteocat stations to process:", len(m_stations))
+
+            for meta in m_stations:
+                code = meta.get("codi") or meta.get("code") or meta.get("id")
+                if not code:
+                    continue
+
+                code = str(code)
+                name = meta.get("nom") or meta.get("name")
+
+                print("Processing Meteocat station:", code, name)
+
+                # 1) upsert station
+                st = await self.station_repo.create_if_not_exists(
+                    source="meteocat",
+                    source_station_id=code,
+                    name=name,
+                )
+                stations_upserted["meteocat"] += 1
+
+                # 2) compute station-specific range
+                start_d = await self._compute_start_date(st.id)
+                print("  start date:", start_d)
+                end_d = meteocat_end
+                print("  end date:", end_d)
+
+                if start_d > end_d:
+                    print("  station already up-to-date")
+                    continue
+
+                # 3) fetch day by day (meteocat api is per day)
                 d = start_d
-                while d <= meteocat_end:
+                while d <= end_d:
+                    print("  fetching date:", d)
                     ts = self._ts_for_day(d)
                     try:
-                        raw = await meteocat_client.daily_by_station(st.source_station_id, d)
-
+                        raw = await meteocat.daily_by_station(code, d)
+                        tmin, tmax, precip, tavg = meteocat.parse_daily_payload(raw)
+                        print(f"  fetched data for {d.isoformat()}")
                         await self.obs_repo.upsert_observation(
                             station_id=st.id,
                             ts=ts,
-                            tmin=None,
-                            tmax=None,
-                            precip=None,
-                            wind=None,
+                            tmin=tmin,
+                            tmax=tmax,
+                            precip=precip,
+                            tavg=tavg,
                             raw=raw,
                         )
+                        print(f"  upserted observation for {d.isoformat()}")
                         observations_upserted["meteocat"] += 1
-
-                    except Exception:
-                        # no abortamos: solo contamos error por estación/día
-                        meteocat_station_errors += 1
+                    except Exception as e:
+                        print("  Meteocat station data error for date:", d, str(e))
+                        failures.setdefault("meteocat_station_errors", 0)
+                        failures["meteocat_station_errors"] += 1
+                        break  # skip to next station on error
                     d += timedelta(days=1)
 
-            if meteocat_station_errors:
-                failures["meteocat_station_errors"] = meteocat_station_errors
-
         except Exception as e:
-            failures["meteocat"] = str(e)"""
+            print("Meteocat sync error:", str(e))
+            failures["meteocat"] = str(e)
 
-        await self.db.commit()
-
-        # Para compatibilidad, devolvemos "date" como el día de fin global (o hoy)
         return IngestionDailyResponse(
             date=self._today_utc(),
             stations_upserted=stations_upserted,

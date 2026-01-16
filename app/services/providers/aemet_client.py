@@ -65,6 +65,17 @@ class AemetClient:
         api_url = f"{self.BASE}/valores/climatologicos/diarios/datos/fechaini/{start}/fechafin/{end}/todasestaciones"
         data = await self._follow_data_url(api_url)
         return list(data) if isinstance(data, list) else []
+    
+    async def daily_range_by_station(self, source_station_id: str, start_date: date, end_date: date) -> List[dict]:
+        """
+        Returns daily rows for one station between start_date and end_date inclusive.
+        """
+        start = f"{start_date.isoformat()}T00:00:00UTC"
+        end = f"{end_date.isoformat()}T23:59:00UTC"
+        api_url = f"{self.BASE}/valores/climatologicos/diarios/datos/fechaini/{start}/fechafin/{end}/estacion/{source_station_id}"
+        data = await self._follow_data_url(api_url)
+        return list(data) if isinstance(data, list) else []
+
 
     @staticmethod
     def parse_numeric(v: Optional[str]) -> Optional[float]:

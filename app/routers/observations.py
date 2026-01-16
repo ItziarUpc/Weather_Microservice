@@ -68,8 +68,8 @@ async def list_observations(
                 date=o.ts.date(),
                 tmin=o.tmin,
                 tmax=o.tmax,
+                tavg=o.tavg,
                 precip=o.precip,
-                wind=o.wind,
             )
             for o in items
         ],

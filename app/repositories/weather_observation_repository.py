@@ -31,8 +31,8 @@ class WeatherObservationRepository:
         ts: datetime,
         tmin: Optional[float] = None,
         tmax: Optional[float] = None,
+        tavg: Optional[float] = None,
         precip: Optional[float] = None,
-        wind: Optional[float] = None,
         raw: Optional[dict] = None,
     ) -> WeatherObservation:
         """
@@ -51,7 +51,6 @@ class WeatherObservationRepository:
             tmin: Minimum temperature value.
             tmax: Maximum temperature value.
             precip: Precipitation amount.
-            wind: Wind speed.
             raw: Raw provider payload stored for traceability.
 
         Returns:
@@ -68,7 +67,7 @@ class WeatherObservationRepository:
             obs.tmin = tmin
             obs.tmax = tmax
             obs.precip = precip
-            obs.wind = wind
+            obs.tavg = tavg
             obs.raw = raw
             await self.db.flush()
             return obs
@@ -78,12 +77,14 @@ class WeatherObservationRepository:
             ts=ts,
             tmin=tmin,
             tmax=tmax,
+            tavg=tavg,
             precip=precip,
-            wind=wind,
             raw=raw,
         )
+        print("Inserting new observation:", station_id, ts, obs)
         self.db.add(obs)
         await self.db.flush()
+        await self.db.commit()
 
         return obs
 

@@ -18,7 +18,6 @@ async def test_get_observations_by_station_id(test_app, db_session):
         tmin=1.0,
         tmax=5.0,
         precip=0.2,
-        wind=None,
     )
     db_session.add(obs)
     await db_session.commit()
